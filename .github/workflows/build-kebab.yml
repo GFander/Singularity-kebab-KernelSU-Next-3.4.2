@@ -1,0 +1,205 @@
+name: Build Singularity kebab (KernelSU-Next)
+
+# 用途：
+#   用 The-Anomalist/Singularity 内核源码 + 指定版本的 KernelSU-Next，
+#   交叉编译出 OnePlus 8T (kebab) 的 Image，并重新打包成刷机用的 AnyKernel3 zip。
+#
+# 默认参数产出的内核：
+#   4.19.325-cip135-st19-ksu342-Singularity + KernelSU-Next v3.4.2 + SUSFS
+#
+# 第一次使用建议先把 ksu_ref 设成 v3.3.0 跑一遍，
+# 用来验证“流水线本身”没问题（此时产物应当和作者的 V17 基本一致），
+# 再改成 v3.4.2 做真正的升级。
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "内核仓库 owner/repo"
+        default: "The-Anomalist/Singularity"
+        required: true
+      kernel_ref:
+        description: "内核分支 / tag / commit"
+        default: "event-horizon"
+        required: true
+      ksu_repo:
+        description: "KernelSU-Next 仓库 owner/repo"
+        default: "KernelSU-Next/KernelSU-Next"
+        required: true
+      ksu_ref:
+        description: "编进内核的 KernelSU-Next tag"
+        default: "v3.4.2"
+        required: true
+      defconfig:
+        description: "defconfig 目标名"
+        default: "vendor/kona-perf_defconfig"
+        required: true
+      clang_r:
+        description: "AOSP clang 预编译版本"
+        default: "clang-r596125"
+        required: true
+      localversion_st:
+        description: "写入 localversion-st 的后缀（便于区分自编译版本）"
+        default: "-st19-ksu342"
+        required: true
+      build_noksu:
+        description: "是否额外编一个 No-KSU 版本（时间约 +10 分钟）"
+        type: boolean
+        default: true
+      ak3_release:
+        description: "AnyKernel3 骨架来源 release tag"
+        default: "V17"
+        required: true
+      ak3_asset:
+        description: "AnyKernel3 骨架 zip 文件名"
+        default: "Singularity-V1.5.0-unified-Root-or-NoKSU.zip"
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build kebab kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    env:
+      ARCH: arm64
+      OUT_DIR: out
+
+    steps:
+      - name: 清理磁盘
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev \
+            zip unzip rsync cpio kmod device-tree-compiler python3 \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          # 下面两个在部分镜像上可能不存在，缺了也不该让整个 job 挂掉
+          sudo apt-get install -y --no-install-recommends libncurses5 || true
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi || true
+          echo "--- toolchain ---"
+          aarch64-linux-gnu-gcc --version | head -1
+          (arm-linux-gnueabi-gcc --version | head -1) || echo "arm 32bit cross gcc 缺失（若内核不开 CONFIG_COMPAT 则无影响）"
+
+      - name: 拉取内核源码
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ inputs.kernel_ref }}" \
+            "https://github.com/${{ inputs.kernel_repo }}.git" kernel
+          cd kernel
+          git submodule update --init --recursive --depth 1
+          git log -1 --oneline
+          echo "--- drivers/kernelsu 指向 ---"
+          ls -l drivers/kernelsu
+
+      - name: 切换 KernelSU-Next 到 ${{ inputs.ksu_ref }}
+        run: |
+          set -euo pipefail
+          cd kernel/KernelSU-Next
+          git remote add upstream "https://github.com/${{ inputs.ksu_repo }}.git" 2>/dev/null || true
+          git fetch --depth 1 upstream "refs/tags/${{ inputs.ksu_ref }}:refs/tags/${{ inputs.ksu_ref }}" \
+            || git fetch --depth 1 upstream "${{ inputs.ksu_ref }}"
+          git checkout -f "${{ inputs.ksu_ref }}"
+          echo "KernelSU-Next = $(git describe --tags --always)"
+          ls core hook susfs >/dev/null && echo "kernel sources OK"
+
+      - name: 打上版本标记
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${{ inputs.localversion_st }}" > kernel/localversion-st
+          echo "localversion-cip = $(cat kernel/localversion-cip)"
+          echo "localversion-st  = $(cat kernel/localversion-st)"
+
+      - name: 下载 clang ${{ inputs.clang_r }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/clang"
+          curl -sSL --retry 5 --retry-delay 5 \
+            -o "$RUNNER_TEMP/clang.tar.gz" \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel/${{ inputs.clang_r }}.tar.gz"
+          tar -xzf "$RUNNER_TEMP/clang.tar.gz" -C "$RUNNER_TEMP/clang"
+          echo "$RUNNER_TEMP/clang/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/clang/bin/clang" --version
+
+      - name: 配置 + 编译（KSU 版）
+        run: |
+          set -euo pipefail
+          cd kernel
+          MAKE_ARGS=(
+            ARCH=arm64
+            O="$OUT_DIR"
+            CC=clang
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          )
+          make "${MAKE_ARGS[@]}" "${{ inputs.defconfig }}"
+          grep -E '^CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS)=' "$OUT_DIR/.config" || true
+          make "${MAKE_ARGS[@]}" -j"$(nproc)" Image
+          make "${MAKE_ARGS[@]}" kernelrelease
+          mkdir -p "$RUNNER_TEMP/artifacts"
+          cp "$OUT_DIR/arch/arm64/boot/Image" "$RUNNER_TEMP/artifacts/Image-KSU"
+          ls -l "$RUNNER_TEMP/artifacts/Image-KSU"
+
+      - name: 编译 No-KSU 版
+        if: ${{ inputs.build_noksu }}
+        run: |
+          set -euo pipefail
+          cd kernel
+          MAKE_ARGS=(
+            ARCH=arm64
+            O="$OUT_DIR"
+            CC=clang
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          )
+          ./scripts/config --file "$OUT_DIR/.config" -d KSU -d KSU_MANUAL_HOOK
+          make "${MAKE_ARGS[@]}" olddefconfig >/dev/null
+          make "${MAKE_ARGS[@]}" -j"$(nproc)" Image
+          cp "$OUT_DIR/arch/arm64/boot/Image" "$RUNNER_TEMP/artifacts/Image-NoKSU"
+          ls -l "$RUNNER_TEMP/artifacts/Image-NoKSU"
+
+      - name: 重新打包 AnyKernel3
+        env:
+          AK3_RELEASE: ${{ inputs.ak3_release }}
+          AK3_ASSET: ${{ inputs.ak3_asset }}
+          KSU_REF: ${{ inputs.ksu_ref }}
+          KERNEL_REF: ${{ inputs.kernel_ref }}
+          LOCALVERSION_ST: ${{ inputs.localversion_st }}
+        run: |
+          set -euo pipefail
+          bash scripts/pack_anykernel.sh
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: singularity-kebab-${{ inputs.ksu_ref }}-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/artifacts/*.zip
+            ${{ runner.temp }}/artifacts/*.txt
+          if-no-files-found: error
+
+      - name: 摘要
+        run: |
+          {
+            echo "### Singularity kebab 构建完成"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 内核源码 | ${{ inputs.kernel_repo }} @ ${{ inputs.kernel_ref }} |"
+            echo "| KernelSU-Next | ${{ inputs.ksu_ref }} |"
+            echo "| defconfig | ${{ inputs.defconfig }} |"
+            echo "| 版本后缀 | ${{ inputs.localversion_st }} |"
+            echo "| clang | ${{ inputs.clang_r }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
