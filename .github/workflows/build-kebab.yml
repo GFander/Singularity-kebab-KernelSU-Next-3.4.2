@@ -48,6 +48,10 @@ on:
         description: "AOSP clang 预编译版本"
         default: "clang-r596125"
         required: true
+      clang_url:
+        description: "（可选）直接指定 clang 压缩包 URL；留空则自动在 main-kernel / android17-release 之间回退"
+        default: ""
+        required: false
       localversion_st:
         description: "写入 localversion-st 的后缀（便于区分自编译版本；留空则不改）"
         default: "-st19-ksu342"
@@ -156,13 +160,49 @@ jobs:
           echo "localversion-st  = $(cat kernel/localversion-st)"
 
       - name: 下载 clang ${{ inputs.clang_r }}
+        env:
+          CLANG_R: ${{ inputs.clang_r }}
+          CLANG_URL_OVERRIDE: ${{ inputs.clang_url }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/clang"
-          curl -sSL --retry 5 --retry-delay 5 \
-            -o "$RUNNER_TEMP/clang.tar.gz" \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel/${{ inputs.clang_r }}.tar.gz"
-          tar -xzf "$RUNNER_TEMP/clang.tar.gz" -C "$RUNNER_TEMP/clang"
+
+          # 关键：必须校验 gzip magic（1f 8b）。
+          # googlesource 对不存在的 ref 会返回 400/404 + HTML 错误页，
+          # 若 curl 不加 -f，会把 HTML 存进 .tar.gz 且退出码仍是 0，
+          # 随后 tar 才报 "not in gzip format"。
+          try_fetch() {
+            local url="$1" code
+            echo "==> 尝试: $url"
+            code=$(curl -fL --retry 3 --retry-delay 5 --retry-all-errors \
+                        --connect-timeout 30 --max-time 900 \
+                        -o "$RUNNER_TEMP/clang.tar.gz" -w '%{http_code}' "$url" 2>/dev/null || true)
+            if [ -s "$RUNNER_TEMP/clang.tar.gz" ] && \
+               [ "$(head -c 2 "$RUNNER_TEMP/clang.tar.gz" | od -An -tx1 | tr -d ' \n')" = "1f8b" ]; then
+              echo "    下载成功 (http=${code})，大小 $(du -h "$RUNNER_TEMP/clang.tar.gz" | cut -f1)"
+              return 0
+            fi
+            echo "    失败 (http=${code:-无})，响应开头是："
+            head -c 160 "$RUNNER_TEMP/clang.tar.gz" 2>/dev/null || true
+            echo
+            rm -f "$RUNNER_TEMP/clang.tar.gz"
+            return 1
+          }
+
+          ok=0
+          if [ -n "${CLANG_URL_OVERRIDE:-}" ]; then
+            try_fetch "$CLANG_URL_OVERRIDE" && ok=1
+          else
+            for ref in refs/heads/main-kernel refs/heads/android17-release; do
+              if try_fetch "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${ref}/${CLANG_R}.tar.gz"; then
+                ok=1
+                break
+              fi
+            done
+          fi
+          [ "$ok" = 1 ] || { echo "!! 所有 clang 源都失败；可在 workflow 里用 clang_url 参数指定镜像"; exit 1; }
+
+          tar -xf "$RUNNER_TEMP/clang.tar.gz" -C "$RUNNER_TEMP/clang"
           echo "$RUNNER_TEMP/clang/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/clang/bin/clang" --version
 
