@@ -4,12 +4,15 @@ name: Build Singularity kebab (KernelSU-Next)
 #   用 The-Anomalist/Singularity 内核源码 + 指定版本的 KernelSU-Next，
 #   交叉编译出 OnePlus 8T (kebab) 的 Image，并重新打包成刷机用的 AnyKernel3 zip。
 #
-# 默认参数产出的内核：
-#   4.19.325-cip135-st19-ksu342-Singularity + KernelSU-Next v3.4.2 + SUSFS
+# 两种模式：
+#   ksu_mode = fork     保持作者 fork 里的 pinned commit（复刻官方 V17，用来验证流水线）
+#   ksu_mode = upstream 把 KernelSU-Next 切到上游指定 tag（真正的版本升级，如 v3.4.2）
 #
-# 第一次使用建议先把 ksu_ref 设成 v3.3.0 跑一遍，
-# 用来验证“流水线本身”没问题（此时产物应当和作者的 V17 基本一致），
-# 再改成 v3.4.2 做真正的升级。
+# 推荐用法：
+#   第 1 次：ksu_mode=fork                        → 验证工具链/编译/打包是否通
+#   第 2 次：ksu_mode=upstream + ksu_ref=v3.4.2   → 真正升级内核侧 KSU
+#
+# 默认 upstream 产物：4.19.325-cip135-st19-ksu342-Singularity + KernelSU-Next v3.4.2 + SUSFS
 
 on:
   workflow_dispatch:
@@ -22,12 +25,19 @@ on:
         description: "内核分支 / tag / commit"
         default: "event-horizon"
         required: true
+      ksu_mode:
+        description: "KernelSU-Next 来源：fork = 作者 pinned commit；upstream = 上游 tag"
+        type: choice
+        options:
+          - upstream
+          - fork
+        default: upstream
       ksu_repo:
-        description: "KernelSU-Next 仓库 owner/repo"
+        description: "KernelSU-Next 上游仓库 owner/repo（仅 upstream 模式使用）"
         default: "KernelSU-Next/KernelSU-Next"
         required: true
       ksu_ref:
-        description: "编进内核的 KernelSU-Next tag"
+        description: "编进内核的 KernelSU-Next tag（仅 upstream 模式使用）"
         default: "v3.4.2"
         required: true
       defconfig:
@@ -39,9 +49,9 @@ on:
         default: "clang-r596125"
         required: true
       localversion_st:
-        description: "写入 localversion-st 的后缀（便于区分自编译版本）"
+        description: "写入 localversion-st 的后缀（便于区分自编译版本；留空则不改）"
         default: "-st19-ksu342"
-        required: true
+        required: false
       build_noksu:
         description: "是否额外编一个 No-KSU 版本（时间约 +10 分钟）"
         type: boolean
@@ -89,7 +99,6 @@ jobs:
             gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi || true
           echo "--- toolchain ---"
           aarch64-linux-gnu-gcc --version | head -1
-          (arm-linux-gnueabi-gcc --version | head -1) || echo "arm 32bit cross gcc 缺失（若内核不开 CONFIG_COMPAT 则无影响）"
 
       - name: 拉取内核源码
         run: |
@@ -102,18 +111,44 @@ jobs:
           echo "--- drivers/kernelsu 指向 ---"
           ls -l drivers/kernelsu
 
-      - name: 切换 KernelSU-Next 到 ${{ inputs.ksu_ref }}
+      - name: 准备 KernelSU-Next（模式：${{ inputs.ksu_mode }}）
         run: |
           set -euo pipefail
           cd kernel/KernelSU-Next
-          git remote add upstream "https://github.com/${{ inputs.ksu_repo }}.git" 2>/dev/null || true
-          git fetch --depth 1 upstream "refs/tags/${{ inputs.ksu_ref }}:refs/tags/${{ inputs.ksu_ref }}" \
-            || git fetch --depth 1 upstream "${{ inputs.ksu_ref }}"
-          git checkout -f "${{ inputs.ksu_ref }}"
-          echo "KernelSU-Next = $(git describe --tags --always)"
-          ls core hook susfs >/dev/null && echo "kernel sources OK"
+          BASE="$(git rev-parse HEAD)"
+          echo "作者 fork 的 pinned commit: $BASE"
+          git log -1 --oneline "$BASE"
+
+          if [ "${{ inputs.ksu_mode }}" = "upstream" ]; then
+            git remote add upstream "https://github.com/${{ inputs.ksu_repo }}.git" 2>/dev/null || true
+            git fetch --depth 1 upstream \
+              "refs/tags/${{ inputs.ksu_ref }}:refs/tags/${{ inputs.ksu_ref }}" \
+              || git fetch --depth 1 upstream "${{ inputs.ksu_ref }}"
+            git checkout -f "${{ inputs.ksu_ref }}"
+            echo "== 已切到上游 ${{ inputs.ksu_ref }} =="
+            echo "== 以下作者 fork 补丁被丢弃（若编译/开机出问题，优先看这些是否需要重新移植）=="
+            git log --oneline "HEAD..$BASE" || true
+          else
+            echo "== 保持作者 pinned commit，用于复刻官方 V17 =="
+          fi
+
+          # 通用健全性检查：KSU 源码在 kernel/ 子目录里，仓库根目录没有这些文件
+          # （v3.4.2 的 kernel/ 有 susfs/，v3.3.0 没有，所以不能用目录名判断）
+          for f in kernel/Kconfig kernel/Kbuild kernel/Makefile; do
+            if [ ! -f "$f" ]; then
+              echo "!! 缺少 $f，submodule 不完整"
+              exit 1
+            fi
+          done
+          echo "--- KernelSU kernel/ 内容 ---"
+          ls -1 kernel | head -25
+
+          KSU_EFFECTIVE="$(git describe --tags --always)"
+          echo "KernelSU-Next 实际版本: $KSU_EFFECTIVE"
+          echo "KSU_EFFECTIVE=$KSU_EFFECTIVE" >> "$GITHUB_ENV"
 
       - name: 打上版本标记
+        if: ${{ inputs.localversion_st != '' }}
         run: |
           set -euo pipefail
           printf '%s\n' "${{ inputs.localversion_st }}" > kernel/localversion-st
@@ -144,8 +179,10 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           )
           make "${MAKE_ARGS[@]}" "${{ inputs.defconfig }}"
-          grep -E '^CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS)=' "$OUT_DIR/.config" || true
+          echo "--- 关键配置 ---"
+          grep -E '^CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS)' "$OUT_DIR/.config" || true
           make "${MAKE_ARGS[@]}" -j"$(nproc)" Image
+          echo "--- 内核版本 ---"
           make "${MAKE_ARGS[@]}" kernelrelease
           mkdir -p "$RUNNER_TEMP/artifacts"
           cp "$OUT_DIR/arch/arm64/boot/Image" "$RUNNER_TEMP/artifacts/Image-KSU"
@@ -174,17 +211,17 @@ jobs:
         env:
           AK3_RELEASE: ${{ inputs.ak3_release }}
           AK3_ASSET: ${{ inputs.ak3_asset }}
-          KSU_REF: ${{ inputs.ksu_ref }}
           KERNEL_REF: ${{ inputs.kernel_ref }}
           LOCALVERSION_ST: ${{ inputs.localversion_st }}
         run: |
           set -euo pipefail
+          export KSU_REF="${KSU_EFFECTIVE:-${{ inputs.ksu_ref }}}"
           bash scripts/pack_anykernel.sh
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: singularity-kebab-${{ inputs.ksu_ref }}-${{ github.run_number }}
+          name: singularity-kebab-run${{ github.run_number }}
           path: |
             ${{ runner.temp }}/artifacts/*.zip
             ${{ runner.temp }}/artifacts/*.txt
@@ -198,7 +235,8 @@ jobs:
             echo "| 项 | 值 |"
             echo "| --- | --- |"
             echo "| 内核源码 | ${{ inputs.kernel_repo }} @ ${{ inputs.kernel_ref }} |"
-            echo "| KernelSU-Next | ${{ inputs.ksu_ref }} |"
+            echo "| KSU 模式 | ${{ inputs.ksu_mode }} |"
+            echo "| KernelSU-Next 实际版本 | ${KSU_EFFECTIVE:-unknown} |"
             echo "| defconfig | ${{ inputs.defconfig }} |"
             echo "| 版本后缀 | ${{ inputs.localversion_st }} |"
             echo "| clang | ${{ inputs.clang_r }} |"
