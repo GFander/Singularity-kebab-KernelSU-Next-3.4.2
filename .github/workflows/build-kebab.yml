@@ -275,6 +275,18 @@ jobs:
           )
           make "${MAKE_ARGS[@]}" "${{ inputs.defconfig }}"
 
+          # ---- 合并 OPLUS config 片段 ----
+          # AOSP/Oplus 构建系统会把 arch/arm64/configs/vendor/oplus.config 叠到 defconfig 上。
+          # 漏掉这一步，OPLUS 驱动（DRM_OPLUS_NOTIFY、OPLUS_FEATURE_PROJECTINFO、
+          # OPLUS_FINGERPRINT、SM8250 充电等）都不会编进去，vmlinux 链接时会出现
+          # msm_drm_notifier_call_chain / is_project / opticalfp_irq_handler_register 未定义。
+          for frag in arch/arm64/configs/vendor/oplus.config; do
+            if [ -f "$frag" ]; then
+              echo "==> 合并 $frag"
+              ./scripts/kconfig/merge_config.sh -m -O "$OUT_DIR" "$OUT_DIR/.config" "$frag"
+            fi
+          done
+
           # ---- 针对 clang 22 的两处适配 ----
           # 1) FRAME_WARN：4.19 默认 2048，drivers/interconnect/qcom/kona.c 里
           #    kona_icc_refresh_bcm_shadow 的栈帧 2784，配合 CONFIG_CC_WERROR=y
