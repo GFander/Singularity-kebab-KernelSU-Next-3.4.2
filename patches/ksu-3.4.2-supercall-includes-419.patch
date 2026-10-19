@@ -1,0 +1,25 @@
+diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
+index a8ed010..e0c9588 100644
+--- a/kernel/supercall/dispatch.c
++++ b/kernel/supercall/dispatch.c
+@@ -5,6 +5,8 @@
+ #include <linux/uaccess.h>
+ #include <linux/version.h>
+ #include <linux/thread_info.h>
++#include <linux/sched/signal.h> // tasklist_lock / task_pgrp / task_session
++#include <linux/init_task.h>   // init_task
+ #include "uapi/supercall.h"
+ #include "supercall/internal.h"
+ #include "arch.h" // IWYU pragma: keep
+diff --git a/kernel/supercall/supercall.c b/kernel/supercall/supercall.c
+index f0dd427..e9e8766 100644
+--- a/kernel/supercall/supercall.c
++++ b/kernel/supercall/supercall.c
+@@ -16,6 +16,7 @@
+ #include "supercall/internal.h"
+ #include "arch.h"
+ #include "util.h"
++#include "compat/kernel_compat.h" // TWA_RESUME 等 4.19 兼容宏
+ #include "klog.h" // IWYU pragma: keep
+ #include "manager/manager_identity.h"
+ 
