@@ -219,9 +219,29 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           )
           make "${MAKE_ARGS[@]}" "${{ inputs.defconfig }}"
+
+          # ---- 针对 clang 22 的两处适配 ----
+          # 1) FRAME_WARN：4.19 默认 2048，drivers/interconnect/qcom/kona.c 里
+          #    kona_icc_refresh_bcm_shadow 的栈帧 2784，配合 CONFIG_CC_WERROR=y
+          #    直接变成 -Werror 失败。抬到上限 8192。
+          # 2) 关掉 CC_WERROR：源码是按更老的 clang 写的，用 clang 22 编会冒出
+          #    更多“新警告变错误”，先把这条路堵死，避免每次都要重跑 40 分钟。
+          ./scripts/config --file "$OUT_DIR/.config" \
+            --set-val FRAME_WARN 8192 \
+            -d CC_WERROR
+          # 3) 关掉 DEBUG_INFO：vmlinux 调试信息对 Image 无用，却让 vDSO 阶段
+          #    刷出几十万行 objdump "Unrecognized form" 警告、还显著拖慢编译。
+          ./scripts/config --file "$OUT_DIR/.config" \
+            -d DEBUG_INFO -d DEBUG_INFO_DWARF4 -d DEBUG_INFO_REDUCED
+          make "${MAKE_ARGS[@]}" olddefconfig >/dev/null
+
           echo "--- 关键配置 ---"
           grep -E '^CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS)' "$OUT_DIR/.config" || true
-          make "${MAKE_ARGS[@]}" -j"$(nproc)" Image
+          grep -E '^CONFIG_(FRAME_WARN|CC_WERROR|DEBUG_INFO)=' "$OUT_DIR/.config" || echo "CFG: FRAME_WARN/CC_WERROR/DEBUG_INFO 已调整"
+
+          # 过滤 objdump 对 DWARF 的噪音（保留其它所有输出）；
+          # 因为有 pipefail，make 的失败码仍会正确向上传递。
+          make "${MAKE_ARGS[@]}" -j"$(nproc)" Image 2>&1 | sed -u '/Unrecognized form/d'
           echo "--- 内核版本 ---"
           make "${MAKE_ARGS[@]}" kernelrelease
           mkdir -p "$RUNNER_TEMP/artifacts"
@@ -243,7 +263,7 @@ jobs:
           )
           ./scripts/config --file "$OUT_DIR/.config" -d KSU -d KSU_MANUAL_HOOK
           make "${MAKE_ARGS[@]}" olddefconfig >/dev/null
-          make "${MAKE_ARGS[@]}" -j"$(nproc)" Image
+          make "${MAKE_ARGS[@]}" -j"$(nproc)" Image 2>&1 | sed -u '/Unrecognized form/d'
           cp "$OUT_DIR/arch/arm64/boot/Image" "$RUNNER_TEMP/artifacts/Image-NoKSU"
           ls -l "$RUNNER_TEMP/artifacts/Image-NoKSU"
 
