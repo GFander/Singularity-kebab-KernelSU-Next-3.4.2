@@ -1,0 +1,17 @@
+diff --git a/drivers/power/supply/qcom/schgm-flash.c b/drivers/power/supply/qcom/schgm-flash.c
+index 11cf6a0..6b9fad4 100644
+--- a/drivers/power/supply/qcom/schgm-flash.c
++++ b/drivers/power/supply/qcom/schgm-flash.c
+@@ -15,9 +15,10 @@
+ #include <linux/of_irq.h>
+ #include <linux/printk.h>
+ #include <linux/pmic-voter.h>
+-#ifndef OPLUS_FEATURE_CHG_BASIC
++/* OplusKernelEnvConfig.mk 全局定义了 OPLUS_FEATURE_CHG_BASIC，
++ * 但本树没有对应的 OPLUS 版头文件；struct smb_charger 只能来自 smb5-lib.h，
++ * 所以这里改为无条件包含，否则 schgm-flash.c 会大面积 incomplete type。 */
+ #include "smb5-lib.h"
+-#endif
+ #include "schgm-flash.h"
+ 
+ #define IS_BETWEEN(left, right, value) \

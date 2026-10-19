@@ -125,6 +125,21 @@ jobs:
           echo "--- drivers/kernelsu 指向 ---"
           ls -l drivers/kernelsu
 
+      - name: 应用内核源码补丁（kernel-patches/）
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          patches=(kernel-patches/*.patch)
+          if [ ${#patches[@]} -eq 0 ]; then
+            echo "没有 kernel-patches/*.patch，跳过"
+            exit 0
+          fi
+          cd kernel
+          for p in "${patches[@]}"; do
+            echo "==> 应用 ../$p"
+            git apply -p1 --verbose "../$p"
+          done
+
       - name: 准备 KernelSU-Next（模式：${{ inputs.ksu_mode }}）
         run: |
           set -euo pipefail
