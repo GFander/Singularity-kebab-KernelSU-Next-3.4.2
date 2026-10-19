@@ -161,6 +161,18 @@ jobs:
           echo "KernelSU-Next 实际版本: $KSU_EFFECTIVE"
           echo "KSU_EFFECTIVE=$KSU_EFFECTIVE" >> "$GITHUB_ENV"
 
+      - name: 覆盖作者 fork 的 4.19 实现（selinux/compat）
+        if: ${{ inputs.ksu_mode == 'upstream' }}
+        run: |
+          set -euo pipefail
+          if [ ! -d ksu-overlay ]; then
+            echo "没有 ksu-overlay，跳过"
+            exit 0
+          fi
+          cp -a ksu-overlay/kernel/. kernel/KernelSU-Next/kernel/
+          echo "已覆盖以下文件："
+          find ksu-overlay -type f | sed 's|^|  |'
+
       - name: 应用 linux-4.19 兼容补丁（仅 upstream 模式）
         if: ${{ inputs.ksu_mode == 'upstream' }}
         run: |

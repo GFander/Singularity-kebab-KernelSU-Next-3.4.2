@@ -1,0 +1,29 @@
+diff --git a/kernel/Kbuild b/kernel/Kbuild
+index c32fa7c..b7df10f 100644
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -44,6 +44,24 @@ kernelsu-objs += runtime/ksud_integration.o
+ kernelsu-objs += selinux/selinux.o
+ kernelsu-objs += selinux/rules.o
+ kernelsu-objs += selinux/sepolicy.o
++kernelsu-objs += selinux/policy_backup.o
++kernelsu-objs += compat/kernel_compat.o
++
++# ---- linux 版本/特性探测（移植自 The-Anomalist fork 的 Kbuild）----
++# 只追加 ccflags 宏，不改内核源码：本内核已自带
++# selinux_inode()/selinux_cred()/current_sid() helper，无需 sed 注入。
++ifeq ($(shell grep -q "current_sid(void)" $(srctree)/security/selinux/include/objsec.h; echo $$?),0)
++ccflags-y += -DKSU_COMPAT_HAS_CURRENT_SID
++endif
++ifeq ($(shell grep -q "struct selinux_state " $(srctree)/security/selinux/include/security.h; echo $$?),0)
++ccflags-y += -DKSU_COMPAT_USE_SELINUX_STATE
++endif
++ifeq ($(shell grep -q "^DEFINE_RWLOCK(policy_rwlock);" $(srctree)/security/selinux/ss/services.c; echo $$?),0)
++ccflags-y += -DKSU_COMPAT_HAS_EXPORTED_POLICY_RWLOCK
++endif
++ifeq ($(shell grep -q "cpus_ptr;" $(srctree)/include/linux/sched.h; echo $$?),0)
++ccflags-y += -DKSU_COMPAT_HAS_BACKPORTED_CPUS_PTR
++endif
+ 
+ kernelsu-objs += sulog/event.o
+ kernelsu-objs += sulog/fd.o
