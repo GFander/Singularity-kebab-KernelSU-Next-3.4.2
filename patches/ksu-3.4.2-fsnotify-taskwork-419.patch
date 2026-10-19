@@ -106,14 +106,15 @@ index 0000000..c4f396d
 +#endif
 \ No newline at end of file
 diff --git a/kernel/policy/allowlist.c b/kernel/policy/allowlist.c
-index fbb3237..00576dc 100644
+index fbb3237..e3f48cb 100644
 --- a/kernel/policy/allowlist.c
 +++ b/kernel/policy/allowlist.c
-@@ -3,6 +3,13 @@
+@@ -3,6 +3,14 @@
  #include <linux/rculist.h>
  #include <linux/mutex.h>
  #include <linux/task_work.h>
 +#include <linux/sched/task.h> // put_task_struct()
++#include <linux/version.h>
 +
 +#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 +#define KSU_TWA_RESUME TWA_RESUME
@@ -123,7 +124,7 @@ index fbb3237..00576dc 100644
  #include <linux/capability.h>
  #include <linux/compiler.h>
  #include <linux/fs.h>
-@@ -484,7 +491,7 @@ void ksu_persistent_allow_list()
+@@ -484,7 +492,7 @@ void ksu_persistent_allow_list()
  		goto put_task;
  	}
  	cb->func = do_persistent_allow_list;
