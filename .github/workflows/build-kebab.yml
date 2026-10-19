@@ -111,6 +111,9 @@ jobs:
           echo "--- toolchain ---"
           aarch64-linux-gnu-gcc --version | head -1
 
+      - name: 检出本仓库（提供 patches/ 与 scripts/）
+        uses: actions/checkout@v4
+
       - name: 拉取内核源码
         run: |
           set -euo pipefail
