@@ -25,6 +25,13 @@ on:
         description: "内核分支 / tag / commit"
         default: "event-horizon"
         required: true
+      mode:
+        description: "full = 完整编译并打包；ksu-only = 只编 drivers/kernelsu（约 6 分钟，用于快速验证 4.19 补丁）"
+        type: choice
+        options:
+          - full
+          - ksu-only
+        default: full
       ksu_mode:
         description: "KernelSU-Next 来源：fork = 作者 pinned commit；upstream = 上游 tag"
         type: choice
@@ -151,6 +158,24 @@ jobs:
           echo "KernelSU-Next 实际版本: $KSU_EFFECTIVE"
           echo "KSU_EFFECTIVE=$KSU_EFFECTIVE" >> "$GITHUB_ENV"
 
+      - name: 应用 linux-4.19 兼容补丁（仅 upstream 模式）
+        if: ${{ inputs.ksu_mode == 'upstream' }}
+        run: |
+          set -euo pipefail
+          cd kernel/KernelSU-Next
+          shopt -s nullglob
+          patches=(../../patches/*.patch)
+          if [ ${#patches[@]} -eq 0 ]; then
+            echo "没有 patches/*.patch，跳过"
+            exit 0
+          fi
+          for p in "${patches[@]}"; do
+            echo "==> 应用 $p"
+            git apply -p1 --verbose "$p"
+          done
+          echo "--- 校验关键守卫 ---"
+          grep -n 'KERNEL_VERSION(4, 20, 0)' kernel/infra/file_wrapper.c || true
+
       - name: 打上版本标记
         if: ${{ inputs.localversion_st != '' }}
         run: |
@@ -206,7 +231,7 @@ jobs:
           echo "$RUNNER_TEMP/clang/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/clang/bin/clang" --version
 
-      - name: 配置 + 编译（KSU 版）
+      - name: 配置内核
         run: |
           set -euo pipefail
           cd kernel
@@ -236,9 +261,40 @@ jobs:
           make "${MAKE_ARGS[@]}" olddefconfig >/dev/null
 
           echo "--- 关键配置 ---"
-          grep -E '^CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS)' "$OUT_DIR/.config" || true
-          grep -E '^CONFIG_(FRAME_WARN|CC_WERROR|DEBUG_INFO)=' "$OUT_DIR/.config" || echo "CFG: FRAME_WARN/CC_WERROR/DEBUG_INFO 已调整"
+          grep -E '^CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS|FRAME_WARN|CC_WERROR|DEBUG_INFO)' "$OUT_DIR/.config" || true
 
+      - name: 快速检查：只编 drivers/kernelsu（mode=ksu-only）
+        if: ${{ inputs.mode == 'ksu-only' }}
+        run: |
+          set -euo pipefail
+          cd kernel
+          MAKE_ARGS=(
+            ARCH=arm64
+            O="$OUT_DIR"
+            CC=clang
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          )
+          echo "==> make prepare"
+          make "${MAKE_ARGS[@]}" -j"$(nproc)" prepare 2>&1 | sed -u '/Unrecognized form/d' | tail -5
+          echo "==> 只编译 drivers/kernelsu"
+          make "${MAKE_ARGS[@]}" -j"$(nproc)" drivers/kernelsu/ 2>&1 | sed -u '/Unrecognized form/d'
+          echo "==> KSU 目录编译通过"
+
+      - name: 编译完整 Image（mode=full）
+        if: ${{ inputs.mode == 'full' }}
+        run: |
+          set -euo pipefail
+          cd kernel
+          MAKE_ARGS=(
+            ARCH=arm64
+            O="$OUT_DIR"
+            CC=clang
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          )
           # 过滤 objdump 对 DWARF 的噪音（保留其它所有输出）；
           # 因为有 pipefail，make 的失败码仍会正确向上传递。
           make "${MAKE_ARGS[@]}" -j"$(nproc)" Image 2>&1 | sed -u '/Unrecognized form/d'
@@ -249,7 +305,7 @@ jobs:
           ls -l "$RUNNER_TEMP/artifacts/Image-KSU"
 
       - name: 编译 No-KSU 版
-        if: ${{ inputs.build_noksu }}
+        if: ${{ inputs.mode == 'full' && inputs.build_noksu }}
         run: |
           set -euo pipefail
           cd kernel
@@ -268,6 +324,7 @@ jobs:
           ls -l "$RUNNER_TEMP/artifacts/Image-NoKSU"
 
       - name: 重新打包 AnyKernel3
+        if: ${{ inputs.mode == 'full' }}
         env:
           AK3_RELEASE: ${{ inputs.ak3_release }}
           AK3_ASSET: ${{ inputs.ak3_asset }}
@@ -279,6 +336,7 @@ jobs:
           bash scripts/pack_anykernel.sh
 
       - name: 上传产物
+        if: ${{ inputs.mode == 'full' }}
         uses: actions/upload-artifact@v4
         with:
           name: singularity-kebab-run${{ github.run_number }}
@@ -288,6 +346,7 @@ jobs:
           if-no-files-found: error
 
       - name: 摘要
+        if: ${{ inputs.mode == 'full' }}
         run: |
           {
             echo "### Singularity kebab 构建完成"
