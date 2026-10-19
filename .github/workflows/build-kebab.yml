@@ -278,6 +278,11 @@ jobs:
           )
           echo "==> make prepare"
           make "${MAKE_ARGS[@]}" -j"$(nproc)" prepare 2>&1 | sed -u '/Unrecognized form/d' | tail -5
+          # KSU 的 file_wrapper.c 会 include security/selinux/include/objsec.h，
+          # 它依赖构建期生成的 flask.h。只编 KSU 目录时必须先编 SELinux，
+          # 否则会误报 'flask.h' file not found（完整构建里不会有这问题）。
+          echo "==> 预编译 security/selinux（生成 flask.h）"
+          make "${MAKE_ARGS[@]}" -j"$(nproc)" security/selinux/ 2>&1 | sed -u '/Unrecognized form/d' | tail -5
           echo "==> 只编译 drivers/kernelsu"
           make "${MAKE_ARGS[@]}" -j"$(nproc)" drivers/kernelsu/ 2>&1 | sed -u '/Unrecognized form/d'
           echo "==> KSU 目录编译通过"
